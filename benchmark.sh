@@ -281,11 +281,11 @@ saturate() {
 
 single() {
     printf "Starting single benchmarks\n"
-    start envoy "Contour (Envoy Proxy)" 1 250 $1
-    start haproxy "HAProxy" 1 250 $1
-    start nginx-inc "NGINX Inc." 1 250 $1
+    # start envoy "Contour (Envoy Proxy)" 1 250 $1
+    # start haproxy "HAProxy" 1 250 $1
+    # start nginx-inc "NGINX Inc." 1 250 $1
     start nginx "NGINX" 1 250 $1
-    start traefik "Traefik" 1 250 $1
+    # start traefik "Traefik" 1 250 $1
 }
 
 case $1 in
