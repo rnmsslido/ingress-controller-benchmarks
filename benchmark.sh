@@ -58,6 +58,8 @@ spec:
       labels:
         app: ubuntu
     spec:
+      nodeSelector:
+        node.kubernetes.io/role: main
       containers:
       - name: ubuntu
         image: ubuntu:latest
@@ -109,7 +111,7 @@ check_cpu() {
     sleep 30
 
     if [ "$proxy" == "nginx" ]; then
-        prefix="nginx-controller"
+        prefix="ingress-nginx-internal-controller"
     fi;
     pod="$(kubectl get pod -o name |grep "$prefix-"|grep -v backend)"
     if [ "$proxy" == "envoy" ]; then
