@@ -13,7 +13,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-. tools/chart.sh
+# Exit on error
+set -e
+
+# Create required directories
+mkdir -p tmp/single tmp/saturate
+
+# Source chart script if it exists
+if [ -f tools/chart.sh ]; then
+    . tools/chart.sh
+else
+    echo "Warning: tools/chart.sh not found. Graphing will be disabled."
+fi
+
 temp_yaml=$(mktemp)
 
 display_working() {
@@ -24,23 +36,22 @@ display_working() {
     if [ -n "$3" ]; then
         if [ $3 -gt 0 ]; then
             secs=$(($3 * 60 * 1000))
-	fi
+        fi
     fi
     while kill -0 $pid 2>/dev/null; do
         i=$(( (i+1) %12 ))
         if [ $secs -gt 0 ]; then
             printf "\r[%s] %s ... ${spin:$i:1}" $(date -d@$((secs / 1000)) -u +%M:%S) "$2"
-	else
-	    printf "\r%s ... ${spin:$i:1}" "$2"
-	fi
+        else
+            printf "\r%s ... ${spin:$i:1}" "$2"
+        fi
         sleep .1
-	secs=$((secs-100))
+        secs=$((secs-100))
     done
     printf "\r%s ... \xE2\x9C\x85%s\n" "$2" "$(tput el)"
 }
 
 setup() {
-
     REPLACE_PARALLELISM="$1"
     INJECTOR_YAML="apiVersion: apps/v1
 kind: Deployment
@@ -63,7 +74,6 @@ spec:
       containers:
       - name: ubuntu
         image: ubuntu:latest
-        # Just sleep forever
         command: [ "sleep"]
         args: [ "infinity" ]
 "
@@ -72,83 +82,77 @@ spec:
     A_INIT_CMD="apt-get update && apt-get -y -f install sysstat"
     B_INIT_CMD="apt-get update;apt-get -y -f upgrade; apt-get -y -f install curl; curl -Lo /usr/local/bin/hey https://hey-release.s3.us-east-2.amazonaws.com/hey_linux_amd64; chmod +x /usr/local/bin/hey;"
     echo -e "$INJECTOR_YAML" >$temp_yaml
-    kubectl create ns ubuntu-injector >/dev/null 2>&1 &
+    kubectl create ns ubuntu-injector >/dev/null 2>&1 || true
     kubectl -n ubuntu-injector apply -f $temp_yaml >/dev/null 2>&1
     sleep 7
     kubectl get pods -n ubuntu-injector -o name|parallel --max-proc 0 kubectl -n ubuntu-injector exec {} -- bash -c \""$B_INIT_CMD"\" >/dev/null 2>&1
-    kubectl get pods -o name |grep nginx-inc | parallel --max-proc 0 kubectl exec {} -- sh -c \""$A_INIT_CMD"\" >/dev/null 2>&1
-    kubectl get pods -o name |grep envoy | parallel --max-proc 0 kubectl exec {} -c envoy -- sh -c \""$A_INIT_CMD"\" >/dev/null 2>&1
     sleep 5
     display_working $! "Setup"
 }
 
 start() {
-CSVOUTPUT=""
-EXT="txt"
-REPLACE_PARALLELISM="$3"
-REPLACE_CONN="$4"
+    CSVOUTPUT=""
+    EXT="txt"
+    REPLACE_PARALLELISM="$3"
+    REPLACE_CONN="$4"
     if [ "$REPLACE_PARALLELISM" -eq 1 ]; then
         t="single"
     else
         t="saturate"
     fi
+    
+    # Create output directory if it doesn't exist
+    mkdir -p tmp/$t
+    
+    # Start the load test
     kubectl get pods -n ubuntu-injector -o name|parallel --max-proc 0 kubectl -n ubuntu-injector exec {} -- bash -c \""hey $CSVOUTPUT -z 360s -c $REPLACE_CONN https://$1.default/"\" |grep -v response-time |sort -nt ',' -k 8  >tmp/$t/$1.$EXT &
     display_working $! "Benchmarking $2" 6 &
+    
+    # Start CPU monitoring
     check_cpu $t $1 &
+    
+    # Run scaling tests
     do_scale
+    
+    # Run modification tests
     do_modify "$1" >/dev/null 2>&1
+    
     sleep 30
 }
 
 check_cpu() {
     proxy="$2"
-    prefix="$proxy"
-    loop="true"
     percent=0
-    current_percent=0
-    cmd_opts=""
-
+    
     sleep 30
-
+    
     if [ "$proxy" == "nginx" ]; then
-        # Look for the nginx controller pod in the correct namespace
+        # Get nginx controller pod
         pod="$(kubectl get pod -n kube-ingress-internal -l app.kubernetes.io/component=controller -o name | head -n1)"
         if [ -z "$pod" ]; then
             echo "Error: Could not find nginx controller pod"
             return 1
         fi
-    else
-        pod="$(kubectl get pod -o name |grep "$prefix-"|grep -v backend)"
+        
+        # Monitor CPU usage
+        while true; do
+            current_percent=$(kubectl exec -n kube-ingress-internal $pod -- sh -c "mpstat 1 1" 2>/dev/null | awk '/Average/ {print int($3)}' | tail -n1)
+            if [ -n "$current_percent" ] && [ "$current_percent" -gt "$percent" ]; then
+                percent=$current_percent
+            fi
+            sleep 1
+        done
     fi
-
-    if [ "$proxy" == "envoy" ]; then
-        cmd_opts="-c envoy"
-    fi
-
-    if [ -z "$pod" ]; then
-        echo "Error: Could not find pod for $proxy"
-        return 1
-    fi
-
-    cmd="kubectl exec -it $pod $cmd_opts -- sh -c \"mpstat 1 5 | grep Average |awk '/^Average/ {print int(\\\$3)}'|tail -n 1\""
-
-    while [ "$(ps -efH |grep "$proxy.default"|grep -v grep)" ]; do
-        current_percent=$(eval $cmd 2>/dev/null |sed 's/%//g'|tr -d '\r')
-        if [ -n "$current_percent" ] && [ "$current_percent" -gt "$percent" ]; then
-            percent=$current_percent
-        fi
-        sleep 1
-    done;
-    echo "${percent}" > tmp/$1/$2.cpu
+    
+    echo "${percent:-0}" > tmp/$1/$2.cpu
 }
-
 
 do_scale() {
     for x in {1..3}; do
         sleep 30
-        kubectl -n app scale --replicas=7  deployment/echo >/dev/null 2>&1
+        kubectl -n app scale --replicas=7 deployment/echo >/dev/null 2>&1
         sleep 30
-        kubectl -n app scale --replicas=5  deployment/echo >/dev/null 2>&1
+        kubectl -n app scale --replicas=5 deployment/echo >/dev/null 2>&1
     done
     sleep 30
 }
@@ -216,7 +220,7 @@ patch_nginx() {
     elif [ "$1" == "rewrite" ]; then
         if [ "$2" == "remove" ]; then
             kubectl -n app annotate ingress nginx nginx.ingress.kubernetes.io/rewrite-target-
-	else
+        else
             kubectl -n app annotate ingress nginx nginx.ingress.kubernetes.io/rewrite-target=/test
         fi
     fi
@@ -261,13 +265,17 @@ patch_traefik() {
 }
 
 cleanup() {
-    kubectl delete namespace ubuntu-injector >/dev/null 2>&1 &
+    kubectl delete namespace ubuntu-injector >/dev/null 2>&1 || true
     display_working $! "Cleaning up"
 }
 
 parse() {
-    graph $1 &
-    display_working $! "Graphing results"
+    if [ -f tools/chart.sh ]; then
+        graph $1 &
+        display_working $! "Graphing results"
+    else
+        echo "Skipping graphing as tools/chart.sh is not available"
+    fi
 }
 
 saturate() {
@@ -281,20 +289,12 @@ saturate() {
 
 single() {
     printf "Starting single benchmarks\n"
-    start envoy "Contour (Envoy Proxy)" 1 250 $1
-    start haproxy "HAProxy" 1 250 $1
-    start nginx-inc "NGINX Inc." 1 250 $1
     start nginx "NGINX" 1 250 $1
-    start traefik "Traefik" 1 250 $1
 }
 
 case $1 in
     "cleanup")
       cleanup
-      exit
-    ;;
-    "collect")
-      collect
       exit
     ;;
     "parse")
