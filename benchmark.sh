@@ -111,20 +111,33 @@ check_cpu() {
     sleep 30
 
     if [ "$proxy" == "nginx" ]; then
-        prefix="ingress-nginx-internal-controller"
-    fi;
-    pod="$(kubectl get pod -o name |grep "$prefix-"|grep -v backend)"
+        # Look for the nginx controller pod in the correct namespace
+        pod="$(kubectl get pod -n kube-ingress-internal -l app.kubernetes.io/component=controller -o name | head -n1)"
+        if [ -z "$pod" ]; then
+            echo "Error: Could not find nginx controller pod"
+            return 1
+        fi
+    else
+        pod="$(kubectl get pod -o name |grep "$prefix-"|grep -v backend)"
+    fi
+
     if [ "$proxy" == "envoy" ]; then
         cmd_opts="-c envoy"
     fi
+
+    if [ -z "$pod" ]; then
+        echo "Error: Could not find pod for $proxy"
+        return 1
+    fi
+
     cmd="kubectl exec -it $pod $cmd_opts -- sh -c \"mpstat 1 5 | grep Average |awk '/^Average/ {print int(\\\$3)}'|tail -n 1\""
 
     while [ "$(ps -efH |grep "$proxy.default"|grep -v grep)" ]; do
-        current_percent=$(eval $cmd |sed 's/%//g'|tr -d '\r')
-        if [ "$current_percent" -gt "$percent" ]; then
+        current_percent=$(eval $cmd 2>/dev/null |sed 's/%//g'|tr -d '\r')
+        if [ -n "$current_percent" ] && [ "$current_percent" -gt "$percent" ]; then
             percent=$current_percent
         fi
-	sleep 1
+        sleep 1
     done;
     echo "${percent}" > tmp/$1/$2.cpu
 }
