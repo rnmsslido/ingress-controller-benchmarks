@@ -83,20 +83,51 @@ spec:
 }
 
 start() {
-CSVOUTPUT=""
-EXT="txt"
-REPLACE_PARALLELISM="$3"
-REPLACE_CONN="$4"
+    CSVOUTPUT=""
+    EXT="txt"
+    REPLACE_PARALLELISM="$3"
+    REPLACE_CONN="$4"
     if [ "$REPLACE_PARALLELISM" -eq 1 ]; then
         t="single"
     else
         t="saturate"
     fi
-    kubectl get pods -n ubuntu-injector -o name|parallel --max-proc 0 kubectl -n ubuntu-injector exec {} -- bash -c \""hey $CSVOUTPUT -z 360s -c $REPLACE_CONN https://$1.default/"\" |grep -v response-time |sort -nt ',' -k 8  >tmp/$t/$1.$EXT &
+    
+    # Create output directory if it doesn't exist
+    mkdir -p tmp/$t
+    
+    # Get the correct ingress service URL based on the controller
+    case "$1" in
+        "nginx")
+            INGRESS_URL="http://ingress-nginx-internal-controller.kube-ingress-internal"
+            ;;
+        "haproxy")
+            INGRESS_URL="http://haproxy-kubernetes-ingress.default"
+            ;;
+        "nginx-inc")
+            INGRESS_URL="http://nginx-inc.default"
+            ;;
+        "traefik")
+            INGRESS_URL="http://traefik.default"
+            ;;
+        "envoy")
+            INGRESS_URL="http://envoy.default"
+            ;;
+    esac
+    
+    # Start the load test
+    kubectl get pods -n ubuntu-injector -o name|parallel --max-proc 0 kubectl -n ubuntu-injector exec {} -- bash -c \""hey $CSVOUTPUT -z 360s -c $REPLACE_CONN $INGRESS_URL/"\" |grep -v response-time |sort -nt ',' -k 8  >tmp/$t/$1.$EXT &
     display_working $! "Benchmarking $2" 6 &
+    
+    # Start CPU monitoring
     check_cpu $t $1 &
+    
+    # Run scaling tests
     do_scale
+    
+    # Run modification tests
     do_modify "$1" >/dev/null 2>&1
+    
     sleep 30
 }
 
